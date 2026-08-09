@@ -1,0 +1,45 @@
+{
+  "id": "cypher-log",
+  "title": "CYPHER LOG",
+  "description": "A floating, book-like journal library for Cypher System worlds. Integrates with Cypher GM Taskbar and Cypher Taskbar — when either module is active, the Cypher Log button automatically moves into the Taskbar instead of floating standalone.",
+  "authors": [
+    {
+      "name": "Cypher GOODIES"
+    }
+  ],
+  "version": "3.2.2",
+  "compatibility": {
+    "minimum": "14",
+    "verified": "14"
+  },
+  "esmodules": [
+    "scripts/cypher-log.js"
+  ],
+  "styles": [
+    "styles/cypher-log.css"
+  ],
+  "relationships": {
+    "systems": [
+      {
+        "id": "cyphersystem",
+        "type": "system"
+      }
+    ],
+    "requires": [],
+    "optional": [
+      {
+        "id": "cypher-gm-taskbar",
+        "type": "module",
+        "reason": "When active, the Cypher Log launcher button is automatically moved into the GM Taskbar instead of floating standalone."
+      },
+      {
+        "id": "cypher-taskbar",
+        "type": "module",
+        "reason": "When active, the Cypher Log launcher button is automatically moved into the player Taskbar (right of the portrait eye button) instead of floating standalone."
+      }
+    ]
+  },
+  "url": "",
+  "manifest": "",
+  "download": ""
+}
