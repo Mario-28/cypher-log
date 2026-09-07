@@ -940,3 +940,27 @@ body>.cl-reader-outline .cl-reader-heading-tab.chapter-tab{font-weight:700;backg
   z-index: 2;
   pointer-events: none;
 }
+
+/* v3.3.0 PLAYER'S LOGS section for GM */
+.cl-folder-player-label {
+  background: linear-gradient(90deg, #2d5a3f, #1a3d2a) !important;
+  color: #b8e6c8 !important;
+  border: 1px solid #4a9c6a;
+  text-shadow: 0 1px 2px #000;
+}
+.cl-folder-player-label i {
+  color: #7dd8a0;
+}
+.cl-player-logs {
+  border: 1px solid #3a6b4f;
+  background: linear-gradient(180deg, #1a2e22, #0f1f16);
+}
+.cl-folder-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #4a3728;
+  color: #d4b896;
+  margin-right: 6px;
+  white-space: nowrap;
+}

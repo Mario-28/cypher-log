@@ -57,13 +57,78 @@ function isCypherLog(entry) {
   try { return Boolean(entry?.getFlag?.(MODULE_ID, FLAG)); }
   catch (error) { console.warn(`${MODULE_ID} | Could not inspect journal entry`, error); return false; }
 }
-function getFolders() {
-  try { return game.settings.get(MODULE_ID, "folders") || []; }
-  catch (error) { return []; }
+function getCurrentActor() {
+  return game.user?.character || canvas?.tokens?.controlled?.[0]?.actor || null;
+}
+function getActorId() {
+  return getCurrentActor()?.id || null;
+}
+function getActorFolders(actorId = null) {
+  const id = actorId || getActorId();
+  if (!id) return [];
+  try {
+    const actor = game.actors?.get(id);
+    return actor?.getFlag?.(MODULE_ID, "folders") || [];
+  } catch { return []; }
 }
 function getFolder(entry) {
   try { return entry?.getFlag?.(MODULE_ID, "folder") || ""; }
   catch (error) { return ""; }
+}
+function getActorForLog(entry) {
+  try { return entry?.getFlag?.(MODULE_ID, "actorId") || null; }
+  catch { return null; }
+}
+async function saveActorFolders(actorId, folders) {
+  const actor = game.actors?.get(actorId);
+  if (!actor) return false;
+  try { await actor.setFlag(MODULE_ID, "folders", [...folders]); return true; }
+  catch (e) { console.error(`${MODULE_ID} | Failed to save actor folders`, e); return false; }
+}
+async function addFolder(name, actorId = null) {
+  const id = actorId || getActorId();
+  if (!id) {
+    // Fallback to world setting for GM
+    const list = getWorldFolders();
+    if (list.includes(name)) return {ok: false, error: "exists"};
+    await game.settings.set(MODULE_ID, "folders", [...list, name]);
+    return {ok: true, list: [...list, name]};
+  }
+  const folders = getActorFolders(id);
+  if (folders.includes(name)) return {ok: false, error: "exists"};
+  await saveActorFolders(id, [...folders, name]);
+  return {ok: true, list: [...folders, name]};
+}
+async function removeFolder(name, actorId = null) {
+  const id = actorId || getActorId();
+  if (!id) {
+    const list = getWorldFolders().filter(f => f !== name);
+    await game.settings.set(MODULE_ID, "folders", list);
+    return {ok: true};
+  }
+  const folders = getActorFolders(id).filter(f => f !== name);
+  await saveActorFolders(id, folders);
+  return {ok: true};
+}
+function getWorldFolders() {
+  try { return game.settings.get(MODULE_ID, "folders") || []; }
+  catch { return []; }
+}
+function getAllFolders() {
+  // Returns all folders visible to current user
+  if (game.user?.isGM) {
+    // GM sees world folders + all actor folders
+    const result = new Set(getWorldFolders());
+    for (const actor of game.actors ?? []) {
+      const af = actor.getFlag?.(MODULE_ID, "folders") || [];
+      af.forEach(f => result.add(f));
+    }
+    return [...result];
+  }
+  // Player sees their actor folders + shared world folders
+  const actorFolders = getActorFolders();
+  const worldFolders = getWorldFolders();
+  return [...new Set([...actorFolders, ...worldFolders])];
 }
 
 class CypherLog {
@@ -72,7 +137,14 @@ class CypherLog {
     return (game.journal?.contents ?? []).filter(e => {
       if (!isCypherLog(e)) return false;
       if (game.user?.isGM) return true;
-      try { return e.getFlag(MODULE_ID, "shared") === true; }
+      // Players see: shared entries OR entries belonging to their current actor
+      const logActorId = getActorForLog(e);
+      const myActorId = getActorId();
+      try {
+        const isShared = e.getFlag(MODULE_ID, "shared") === true;
+        const isMine = myActorId && logActorId === myActorId;
+        return isShared || isMine;
+      }
       catch { return false; }
     }); 
   }
@@ -385,7 +457,7 @@ class CypherLog {
     const folderFilter=this.library.querySelector('[data-filter="folders"]')?.value||"";
     const sort=this.library.querySelector('[data-filter="sort"]')?.value||"name-asc";
     const allEntries=this.entries();
-    const folders=getFolders();
+    const folders=getAllFolders();
     const foldersSelect=this.library.querySelector('[data-filter="folders"]');
     if(foldersSelect){ const current=foldersSelect.value; const folderOpts=folders.map(f=>`<option value="${foundry.utils.escapeHTML(f)}" ${f===current?'selected':''}>${foundry.utils.escapeHTML(f)}</option>`).join(''); foldersSelect.innerHTML=`<option value="">All folders</option>${folderOpts}`; }
     const tagsSelect=this.library.querySelector('[data-filter="tags"]');
@@ -394,8 +466,87 @@ class CypherLog {
     entries.sort((a,b)=>{ if(sort==='name-desc')return b.name.localeCompare(a.name); if(sort==='newest')return (b._stats?.createdTime||0)-(a._stats?.createdTime||0); if(sort==='oldest')return (a._stats?.createdTime||0)-(b._stats?.createdTime||0); return a.name.localeCompare(b.name); });
     if (!entries.length) { shelf.innerHTML = `<div class="cl-empty"><i class="fa-solid fa-feather-pointed"></i><p>Your log is empty.</p><span>Select the pen to write the first entry.</span></div>`; return; }
     shelf.innerHTML = "";
-    // Group by folder when showing all folders
-    if (!folderFilter && folders.length) {
+    // GM sees player logs grouped under "PLAYER'S LOGS"
+    if (game.user?.isGM && !folderFilter) {
+      const playerEntries = entries.filter(e => getActorForLog(e));
+      const gmEntries = entries.filter(e => !getActorForLog(e));
+      
+      if (playerEntries.length) {
+        const section = document.createElement("div");
+        section.className = "cl-folder-section cl-player-logs";
+        const label = document.createElement("div");
+        label.className = "cl-folder-label cl-folder-player-label";
+        label.innerHTML = `<i class="fa-solid fa-users"></i><span>PLAYER'S LOGS</span>`;
+        const bookGrid = document.createElement("div");
+        bookGrid.className = "cl-folder-books";
+        for (const entry of playerEntries) {
+          this._renderBookCard(entry, bookGrid);
+        }
+        section.append(label, bookGrid);
+        shelf.append(section);
+      }
+      
+      // GM's own folders/uncategorized
+      if (gmEntries.length) {
+        if (!folders.length) {
+          const section = document.createElement("div");
+          section.className = "cl-folder-section cl-folder-single";
+          const bookGrid = document.createElement("div");
+          bookGrid.className = "cl-folder-books";
+          for (const entry of gmEntries) {
+            this._renderBookCard(entry, bookGrid);
+          }
+          section.append(bookGrid);
+          shelf.append(section);
+        } else {
+          const grouped = new Map();
+          const uncategorized = [];
+          for (const entry of gmEntries) {
+            const f = getFolder(entry);
+            if (f && folders.includes(f)) {
+              if (!grouped.has(f)) grouped.set(f, []);
+              grouped.get(f).push(entry);
+            } else {
+              uncategorized.push(entry);
+            }
+          }
+          let visibleFolderIndex = 0;
+          for (let i = 0; i < folders.length; i++) {
+            const folderName = folders[i];
+            const folderEntries = grouped.get(folderName) || [];
+            if (!folderEntries.length) continue;
+            const section = document.createElement("div");
+            section.className = "cl-folder-section" + (visibleFolderIndex % 2 === 1 ? " cl-folder-even" : "");
+            visibleFolderIndex++;
+            const label = document.createElement("div");
+            label.className = "cl-folder-label";
+            label.innerHTML = `<i class="fa-solid fa-folder"></i><span>${foundry.utils.escapeHTML(folderName)}</span>`;
+            const bookGrid = document.createElement("div");
+            bookGrid.className = "cl-folder-books";
+            for (const entry of folderEntries) {
+              this._renderBookCard(entry, bookGrid);
+            }
+            section.append(label, bookGrid);
+            shelf.append(section);
+          }
+          if (uncategorized.length) {
+            const section = document.createElement("div");
+            section.className = "cl-folder-section" + (visibleFolderIndex % 2 === 1 ? " cl-folder-even" : "");
+            const label = document.createElement("div");
+            label.className = "cl-folder-label cl-folder-uncategorized";
+            label.innerHTML = `<i class="fa-solid fa-layer-group"></i><span>Uncategorized</span>`;
+            const bookGrid = document.createElement("div");
+            bookGrid.className = "cl-folder-books";
+            for (const entry of uncategorized) {
+              this._renderBookCard(entry, bookGrid);
+            }
+            section.append(label, bookGrid);
+            shelf.append(section);
+          }
+        }
+      }
+    } else if (!folderFilter && folders.length) {
+      // Normal folder view for players
       const grouped = new Map();
       const uncategorized = [];
       for (const entry of entries) {
@@ -535,40 +686,119 @@ class CypherLog {
   }
   static openFolderManager() {
     document.querySelector(".cl-folder-manager")?.remove();
-    const folders = getFolders();
     const dialog = document.createElement("section");
     dialog.className = "cl-folder-manager";
+    const myActorId = getActorId();
+    const isGM = game.user?.isGM;
+
     const renderList = () => {
       const list = dialog.querySelector(".cl-folder-list");
       if (!list) return;
-      if (!folders.length) { list.innerHTML = `<p class="cl-folder-empty">No folders yet.</p>`; return; }
-      list.innerHTML = folders.map((f, i) => `<div class="cl-folder-item" data-index="${i}"><i class="fa-solid fa-folder"></i><input type="text" value="${foundry.utils.escapeHTML(f)}" data-index="${i}"><button data-action="delete" data-index="${i}" title="Delete folder"><i class="fa-solid fa-trash-can"></i></button></div>`).join('');
+
+      let allFolders = [];
+      let folderSources = new Map(); // folder name -> {actorId, actorName, isMine}
+
+      if (isGM) {
+        // GM sees all folders from all actors
+        for (const actor of game.actors ?? []) {
+          const af = actor.getFlag?.(MODULE_ID, "folders") || [];
+          for (const f of af) {
+            if (!folderSources.has(f)) folderSources.set(f, []);
+            folderSources.get(f).push({actorId: actor.id, actorName: actor.name, isMine: false});
+          }
+        }
+        const worldFolders = getWorldFolders();
+        for (const f of worldFolders) {
+          if (!folderSources.has(f)) folderSources.set(f, []);
+          folderSources.get(f).push({actorId: null, actorName: "GM World", isMine: true});
+        }
+        allFolders = [...folderSources.keys()];
+      } else {
+        // Players see their actor folders
+        const myFolders = getActorFolders(myActorId);
+        for (const f of myFolders) {
+          folderSources.set(f, [{actorId: myActorId, actorName: "My Folders", isMine: true}]);
+        }
+        allFolders = myFolders;
+      }
+
+      if (!allFolders.length) { list.innerHTML = `<p class="cl-folder-empty">No folders yet.</p>`; return; }
+
+      list.innerHTML = allFolders.map((f, i) => {
+        const sources = folderSources.get(f) || [];
+        const isMine = sources.some(s => s.isMine || s.actorId === myActorId);
+        const actorBadge = isGM && sources.length > 0 
+          ? `<span class="cl-folder-badge" title="${sources.map(s => s.actorName).join(', ')}">${sources.length > 1 ? sources.length + ' actors' : sources[0].actorName}</span>` 
+          : '';
+        return `<div class="cl-folder-item" data-index="${i}">${actorBadge}<i class="fa-solid fa-folder"></i><input type="text" value="${foundry.utils.escapeHTML(f)}" data-name="${foundry.utils.escapeHTML(f)}" ${isMine ? '' : 'disabled'}>${isMine ? `<button data-action="delete" data-name="${foundry.utils.escapeHTML(f)}" title="Delete folder"><i class="fa-solid fa-trash-can"></i></button>` : ''}</div>`;
+      }).join('');
+
+      // Rename handlers
       list.querySelectorAll('input').forEach(input => input.addEventListener('change', async () => {
-        const idx = Number(input.dataset.index);
-        const oldName = folders[idx];
+        const oldName = input.dataset.name;
         const newName = input.value.trim();
         if (!newName || newName === oldName) { renderList(); return; }
-        folders[idx] = newName;
-        await game.settings.set(MODULE_ID, "folders", [...folders]);
-        // Update entries that had the old folder name
-        for (const entry of this.entries()) {
-          const ef = getFolder(entry);
-          if (ef === oldName) await entry.setFlag(MODULE_ID, "folder", newName);
+        if (allFolders.includes(newName)) { ui.notifications.warn("CYPHER LOG | Folder already exists."); renderList(); return; }
+
+        try {
+          // Rename in actor folders
+          for (const actor of game.actors ?? []) {
+            const af = actor.getFlag?.(MODULE_ID, "folders") || [];
+            if (af.includes(oldName)) {
+              await actor.setFlag(MODULE_ID, "folders", af.map(f => f === oldName ? newName : f));
+            }
+          }
+          // Rename in world folders (GM only)
+          if (isGM) {
+            const worldFolders = getWorldFolders();
+            if (worldFolders.includes(oldName)) {
+              await game.settings.set(MODULE_ID, "folders", worldFolders.map(f => f === oldName ? newName : f));
+            }
+          }
+          // Update entries that had the old folder name
+          for (const entry of this.entries()) {
+            if (getFolder(entry) === oldName) {
+              await entry.setFlag(MODULE_ID, "folder", newName);
+            }
+          }
+          this.renderShelf();
+          ui.notifications.info(`CYPHER LOG | Folder renamed to "${newName}".`);
+        } catch (error) {
+          console.error(`${MODULE_ID} | Failed to rename folder`, error);
+          ui.notifications.error("CYPHER LOG | Could not rename folder.");
         }
-        this.renderShelf();
-        ui.notifications.info(`CYPHER LOG | Folder renamed to "${newName}".`);
-      }));
-      list.querySelectorAll('[data-action="delete"]').forEach(btn => btn.addEventListener('click', async () => {
-        const idx = Number(btn.dataset.index);
-        const name = folders[idx];
-        if (!confirm(`Delete folder "${name}"? Documents in this folder will become uncategorized.`)) return;
-        folders.splice(idx, 1);
-        await game.settings.set(MODULE_ID, "folders", [...folders]);
-        this.renderShelf();
         renderList();
-        ui.notifications.info(`CYPHER LOG | Folder "${name}" deleted.`);
+      }));
+
+      // Delete handlers
+      list.querySelectorAll('[data-action="delete"]').forEach(btn => btn.addEventListener('click', async () => {
+        const name = btn.dataset.name;
+        if (!confirm(`Delete folder "${name}"? Documents in this folder will become uncategorized.`)) return;
+        try {
+          // Remove from actor folders
+          for (const actor of game.actors ?? []) {
+            const af = actor.getFlag?.(MODULE_ID, "folders") || [];
+            if (af.includes(name)) {
+              await actor.setFlag(MODULE_ID, "folders", af.filter(f => f !== name));
+            }
+          }
+          // Remove from world folders (GM)
+          if (isGM) {
+            const worldFolders = getWorldFolders();
+            if (worldFolders.includes(name)) {
+              await game.settings.set(MODULE_ID, "folders", worldFolders.filter(f => f !== name));
+            }
+          }
+          this.renderShelf();
+          renderList();
+          ui.notifications.info(`CYPHER LOG | Folder "${name}" deleted.`);
+        } catch (error) {
+          console.error(`${MODULE_ID} | Failed to delete folder`, error);
+          ui.notifications.error("CYPHER LOG | Could not delete folder.");
+        }
       }));
     };
+
     dialog.innerHTML = `<header><span><i class="fa-solid fa-folder-open"></i> Manage Folders</span><button data-action="close"><i class="fa-solid fa-xmark"></i></button></header><main><div class="cl-folder-list"></div><div class="cl-folder-add"><input type="text" placeholder="New folder name"><button data-action="add"><i class="fa-solid fa-plus"></i> Add Folder</button></div></main>`;
     document.body.append(dialog);
     const close = () => dialog.remove();
@@ -577,13 +807,20 @@ class CypherLog {
       const input = dialog.querySelector('.cl-folder-add input');
       const name = input.value.trim();
       if (!name) return;
-      if (folders.includes(name)) { ui.notifications.warn("CYPHER LOG | Folder already exists."); return; }
-      folders.push(name);
-      await game.settings.set(MODULE_ID, "folders", [...folders]);
-      input.value = "";
-      renderList();
-      this.renderShelf();
-      ui.notifications.info(`CYPHER LOG | Folder "${name}" created.`);
+      try {
+        const result = await addFolder(name, myActorId);
+        if (!result.ok) {
+          if (result.error === "exists") ui.notifications.warn("CYPHER LOG | Folder already exists.");
+          return;
+        }
+        input.value = "";
+        renderList();
+        this.renderShelf();
+        ui.notifications.info(`CYPHER LOG | Folder "${name}" created.`);
+      } catch (error) {
+        console.error(`${MODULE_ID} | Failed to create folder`, error);
+        ui.notifications.error("CYPHER LOG | Could not create folder.");
+      }
     });
     renderList();
   }
@@ -799,7 +1036,7 @@ class CypherLog {
     const left = saved.x >= 0 ? saved.x : Math.round((window.innerWidth - width) / 2), top = saved.y >= 0 ? saved.y : Math.round((window.innerHeight - height) / 2);
     dialog.style.cssText = `left:${left}px;top:${top}px;width:${width}px;height:${height}px;`;
     const entryFolder = entry ? getFolder(entry) : (template?.folder || "");
-    const folders = getFolders();
+    const folders = getAllFolders();
     const folderOptions = folders.map(f => `<option value="${foundry.utils.escapeHTML(f)}" ${f === entryFolder ? 'selected' : ''}>${foundry.utils.escapeHTML(f)}</option>`).join('');
     dialog.innerHTML = `<header class="cl-editor-header"><span><i class="fa-solid fa-pen-nib"></i> ${entry ? "Edit log" : "New log"}</span><button type="button" data-action="close"><i class="fa-solid fa-xmark"></i></button></header><main>
       <section class="cl-document-meta"><input class="cl-title" type="text" value="${foundry.utils.escapeHTML(entry?.name ?? template?.title ?? "Untitled Log")}" ${editable ? "" : "disabled"} aria-label="Document title"><label class="cl-cover-url"><i class="fa-solid fa-image"></i><input type="url" value="${foundry.utils.escapeHTML(entry?.getFlag(MODULE_ID, "cover") ?? "")}" placeholder="Cover image URL (optional)" ${editable ? "" : "disabled"} aria-label="Cover image URL"></label><label class="cl-folder-select"><i class="fa-solid fa-folder-open"></i><select ${editable ? "" : "disabled"} aria-label="Folder"><option value="">No folder</option>${folderOptions}</select></label><label class="cl-shared-check" title="Visible to all players"><input type="checkbox" name="shared" ${entry?.getFlag(MODULE_ID, "shared") ? 'checked' : ''} ${editable ? '' : 'disabled'}><i class="fa-solid fa-users"></i> Shared with players</label></section>
@@ -867,11 +1104,16 @@ class CypherLog {
       const data = JSON.parse(snapshot());
       try {
         let savedEntry = entry;
+        const actorId = getActorId();
         if (entry) {
           await entry.update({name:data.name}); await entry.setFlag(MODULE_ID, "cover", data.cover === ICON ? "" : data.cover);
-          await entry.setFlag(MODULE_ID, "tags", data.tags); await entry.setFlag(MODULE_ID, "folder", data.folder); await entry.setFlag(MODULE_ID, "shared", data.shared); await page.update({name:data.name, text:{content:data.content}});
+          await entry.setFlag(MODULE_ID, "tags", data.tags); await entry.setFlag(MODULE_ID, "folder", data.folder); await entry.setFlag(MODULE_ID, "shared", data.shared);
+          if (actorId) await entry.setFlag(MODULE_ID, "actorId", actorId);
+          await page.update({name:data.name, text:{content:data.content}});
         } else {
-          savedEntry = await JournalEntry.create({name:data.name, pages:[{name:data.name, type:"text", text:{content:data.content, format:CONST.JOURNAL_ENTRY_PAGE_FORMATS.HTML}}], flags:{[MODULE_ID]:{[FLAG]:true, cover:data.cover === ICON ? "" : data.cover, tags:data.tags, folder:data.folder, shared:data.shared}}});
+          const flags = {[MODULE_ID]:{[FLAG]:true, cover:data.cover === ICON ? "" : data.cover, tags:data.tags, folder:data.folder, shared:data.shared}};
+          if (actorId) flags[MODULE_ID].actorId = actorId;
+          savedEntry = await JournalEntry.create({name:data.name, pages:[{name:data.name, type:"text", text:{content:data.content, format:CONST.JOURNAL_ENTRY_PAGE_FORMATS.HTML}}], flags});
           entry = savedEntry; page = savedEntry.pages.contents.find(p => p.type === "text");
         }
         lastSavedSnapshot = JSON.stringify(data); dirty = snapshot() !== lastSavedSnapshot;
@@ -911,4 +1153,4 @@ Hooks.on("updateJournalEntry", entry => { if (isCypherLog(entry)) CypherLog.rend
 Hooks.on("createJournalEntryPage", page => { if (isCypherLog(page.parent)) CypherLog.renderShelf(); });
 Hooks.on("updateJournalEntryPage", page => { if (isCypherLog(page.parent)) CypherLog.renderShelf(); });
 Hooks.on("deleteJournalEntry", () => CypherLog.renderShelf()); Hooks.on("renderPause", () => CypherLog.injectButton()); globalThis.CypherLog = CypherLog;
-globalThis.CypherLog.VERSION = "3.2.3";
+globalThis.CypherLog.VERSION = "3.3.0";
